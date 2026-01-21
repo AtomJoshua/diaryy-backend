@@ -4,6 +4,7 @@ const db = require("../db/database");
 const { voiceUpload } = require("../middleware/voiceUpload");
 const multer = require("multer");
 const fs = require("fs");
+const cloudinary = require("../config/cloudinary");
 
 const router = express.Router();
 
@@ -19,21 +20,24 @@ router.post("/", authMiddleware, (req, res) => {
   }
 
   try {
-    const result = db.prepare(`
+    const result = db
+      .prepare(
+        `
       INSERT INTO entries (user_id, type, content, createdAt)
       VALUES (?, ?, ?, ?)
-    `).run(
-      req.user.id,
-      type,
-      content,
-      new Date().toISOString()
-    );
+    `,
+      )
+      .run(req.user.id, type, content, new Date().toISOString());
 
-    const entry = db.prepare(`
+    const entry = db
+      .prepare(
+        `
       SELECT id, type, content, createdAt
       FROM entries
       WHERE id = ?
-    `).get(result.lastInsertRowid);
+    `,
+      )
+      .get(result.lastInsertRowid);
 
     res.status(201).json(entry);
   } catch (err) {
@@ -43,13 +47,13 @@ router.post("/", authMiddleware, (req, res) => {
 });
 
 
-// Create voice entry
+// Create voice entry (Cloudinary)
 
 router.post(
   "/voice",
   authMiddleware,
   voiceUpload.single("audio"),
-  (req, res) => {
+  async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ message: "Audio file is required" });
     }
@@ -65,79 +69,83 @@ router.post(
       parsedDuration = Math.floor(d);
     }
 
-    const audioUrl = `/uploads/voices/${req.file.filename}`;
-
     try {
-      const result = db.prepare(`
+      // 🔹 Upload to Cloudinary
+      const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+        resource_type: "video", // REQUIRED for audio
+        folder: "diary/voices",
+      });
+
+      // 🔹 Remove local temp file
+      fs.unlink(req.file.path, () => {});
+
+      // 🔹 Save Cloudinary URL
+      const result = db
+        .prepare(
+          `
         INSERT INTO entries (
           user_id,
           type,
-          audioUrl,
+          content,
           duration,
           createdAt
         )
         VALUES (?, 'voice', ?, ?, ?)
-      `).run(
-        req.user.id,
-        audioUrl,
-        parsedDuration,
-        new Date().toISOString()
-      );
+      `,
+        )
+        .run(
+          req.user.id,
+          uploadResult.secure_url,
+          parsedDuration,
+          new Date().toISOString(),
+        );
 
-      const entry = db.prepare(`
-        SELECT id, type, audioUrl, duration, createdAt
+      const entry = db
+        .prepare(
+          `
+        SELECT id, type, content, duration, createdAt
         FROM entries
         WHERE id = ?
-      `).get(result.lastInsertRowid);
+      `,
+        )
+        .get(result.lastInsertRowid);
 
       res.status(201).json(entry);
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Internal server error" });
     }
-  }
+  },
 );
 
 
-// read entries (unified feed + pagination)
+// Read entries (unified feed)
+
 router.get("/", authMiddleware, (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   const limit = Math.min(parseInt(req.query.limit) || 20, 50);
   const offset = (page - 1) * limit;
 
   try {
-    const entries = db.prepare(`
+    const entries = db
+      .prepare(
+        `
       SELECT id, type, content, duration, createdAt
       FROM entries
       WHERE user_id = ?
       ORDER BY createdAt DESC
       LIMIT ? OFFSET ?
-    `).all(req.user.id, limit, offset);
+    `,
+      )
+      .all(req.user.id, limit, offset);
 
-    const normalized = entries.map(entry => {
-      if (entry.type === "voice") {
-        return {
-          id: entry.id,
-          type: entry.type,
-          audioUrl: `/${entry.content}`,
-          duration: entry.duration,
-          createdAt: entry.createdAt
-        };
-      }
-
-      return entry;
-    });
-
-    res.json({
-      page,
-      limit,
-      entries: normalized
-    });
+    res.json({ page, limit, entries });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 // Update text entry
 
@@ -150,27 +158,37 @@ router.put("/:id", authMiddleware, (req, res) => {
   }
 
   try {
-    const entry = db.prepare(`
+    const entry = db
+      .prepare(
+        `
       SELECT id
       FROM entries
       WHERE id = ? AND user_id = ? AND type = 'text'
-    `).get(entryId, req.user.id);
+    `,
+      )
+      .get(entryId, req.user.id);
 
     if (!entry) {
       return res.status(404).json({ message: "Entry not found" });
     }
 
-    db.prepare(`
+    db.prepare(
+      `
       UPDATE entries
       SET content = ?
       WHERE id = ? AND user_id = ?
-    `).run(content, entryId, req.user.id);
+    `,
+    ).run(content, entryId, req.user.id);
 
-    const updatedEntry = db.prepare(`
+    const updatedEntry = db
+      .prepare(
+        `
       SELECT id, type, content, createdAt
       FROM entries
       WHERE id = ?
-    `).get(entryId);
+    `,
+      )
+      .get(entryId);
 
     res.json(updatedEntry);
   } catch (err) {
@@ -181,36 +199,33 @@ router.put("/:id", authMiddleware, (req, res) => {
 
 
 // Delete entry
+
 router.delete("/:id", authMiddleware, (req, res) => {
   const { id } = req.params;
 
   try {
-    // 1. Fetch the entry first
-    const entry = db.prepare(`
+    const entry = db
+      .prepare(
+        `
       SELECT id, type, content
       FROM entries
       WHERE id = ? AND user_id = ?
-    `).get(id, req.user.id);
+    `,
+      )
+      .get(id, req.user.id);
 
     if (!entry) {
       return res.status(404).json({ message: "Entry not found" });
     }
 
-    // 2. If it's a voice entry, delete the audio file
-    if (entry.type === "voice" && entry.content) {
-      fs.unlink(entry.content, (err) => {
-        if (err) {
-          // log but don't fail the request
-          console.error("Failed to delete audio file:", err.message);
-        }
-      });
-    }
+    // Cloudinary files are NOT deleted here (safe for now)
 
-    // 3. Delete the database row
-    db.prepare(`
+    db.prepare(
+      `
       DELETE FROM entries
       WHERE id = ? AND user_id = ?
-    `).run(id, req.user.id);
+    `,
+    ).run(id, req.user.id);
 
     res.json({ message: "Entry deleted successfully" });
   } catch (err) {
@@ -218,6 +233,7 @@ router.delete("/:id", authMiddleware, (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 // Multer error handler
 
