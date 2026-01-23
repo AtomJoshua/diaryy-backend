@@ -7,67 +7,49 @@ const fs = require("fs");
 const cloudinary = require("../config/cloudinary");
 
 const router = express.Router();
-
-// Configure Multer for general media upload (images & videos)
 const mediaUpload = multer({ dest: "uploads/" });
 
-// --- NEW ENDPOINT: Upload Media File ---
+// 1. Upload Media (Images/Video)
 router.post(
   "/upload-media",
   authMiddleware,
   mediaUpload.single("file"),
   async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ message: "No file uploaded" });
-    }
-
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
     try {
-      // Upload to Cloudinary, letting it auto-detect the type (image/video)
       const uploadResult = await cloudinary.uploader.upload(req.file.path, {
         resource_type: "auto",
         folder: "diary/media",
       });
-
-      // Remove local temp file
       fs.unlink(req.file.path, () => {});
-
-      // Return the secure URL to the frontend
       res.json({
         url: uploadResult.secure_url,
         type: uploadResult.resource_type,
       });
     } catch (err) {
-      console.error("Media upload error:", err);
-      // Try to clean up temp file even on error
+      console.error("Media Upload Error:", err);
       if (req.file) fs.unlink(req.file.path, () => {});
-      res.status(500).json({ message: "Failed to upload media" });
+      res.status(500).json({ message: "Upload failed" });
     }
   },
 );
 
-// --- UPDATED: Create text/media entry ---
+// 2. Create Text Entry
 router.post("/", authMiddleware, async (req, res) => {
-  // Now accepts title and media_urls array
   const { title, content, media_urls } = req.body;
   const type = "text";
+  const mediaJson = JSON.stringify(media_urls || []);
 
-  // Content is optional now if they just want to post media/title
-  // But let's require at least one of title, content, or media.
-  if (!title && !content && (!media_urls || media_urls.length === 0)) {
-    return res.status(400).json({ message: "Entry must have some content" });
+  if (!content && (!media_urls || media_urls.length === 0)) {
+    return res.status(400).json({ message: "Entry must have content" });
   }
-
-  // Ensure media_urls is a proper JSON array string for Postgres
-  const mediaJson = media_urls ? JSON.stringify(media_urls) : "[]";
 
   try {
     const result = await db.query(
       `INSERT INTO entries (user_id, type, title, content, media_urls, createdAt)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       RETURNING *`,
-      [req.user.id, type, title || null, content || null, mediaJson],
+       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
+      [req.user.id, type, title || "", content || "", mediaJson],
     );
-
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -75,43 +57,40 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-// --- UPDATED: Create voice entry ---
+// 3. Create Voice Entry (UPDATED: Now saves media_urls)
 router.post(
   "/voice",
   authMiddleware,
   voiceUpload.single("audio"),
   async (req, res) => {
-    if (!req.file) {
+    if (!req.file)
       return res.status(400).json({ message: "Audio file is required" });
-    }
 
-    // Now accepts a title
-    const { duration, title } = req.body;
-    let parsedDuration = null;
+    const { title, duration, media_urls } = req.body;
+    const mediaJson = media_urls ? media_urls : "[]"; // media_urls comes as string from FormData
 
-    if (duration !== undefined) {
-      const d = Number(duration);
-      if (Number.isNaN(d) || d <= 0) {
-        return res.status(400).json({ message: "Invalid duration" });
-      }
-      parsedDuration = Math.floor(d);
-    }
+    let parsedDuration = 0;
+    if (duration) parsedDuration = Math.floor(Number(duration));
 
     try {
       const uploadResult = await cloudinary.uploader.upload(req.file.path, {
         resource_type: "video",
         folder: "diary/voices",
       });
-
       fs.unlink(req.file.path, () => {});
 
+      // FIX: Added media_urls to the insert
       const result = await db.query(
-        `INSERT INTO entries (user_id, type, title, content, duration, createdAt)
-         VALUES ($1, 'voice', $2, $3, $4, NOW())
-         RETURNING *`,
-        [req.user.id, title || null, uploadResult.secure_url, parsedDuration],
+        `INSERT INTO entries (user_id, type, title, content, media_urls, duration, createdAt)
+       VALUES ($1, 'voice', $2, $3, $4, $5, NOW()) RETURNING *`,
+        [
+          req.user.id,
+          title || "Voice Note",
+          uploadResult.secure_url,
+          mediaJson,
+          parsedDuration,
+        ],
       );
-
       res.status(201).json(result.rows[0]);
     } catch (err) {
       console.error(err);
@@ -120,23 +99,17 @@ router.post(
   },
 );
 
-// Read entries (unified feed) - No changes needed here
+// 4. Get All Entries
 router.get("/", authMiddleware, async (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   const limit = Math.min(parseInt(req.query.limit) || 20, 50);
   const offset = (page - 1) * limit;
 
   try {
-    // Select all new columns
     const result = await db.query(
-      `SELECT id, type, title, content, media_urls, duration, createdAt
-       FROM entries
-       WHERE user_id = $1
-       ORDER BY createdAt DESC
-       LIMIT $2 OFFSET $3`,
+      `SELECT * FROM entries WHERE user_id = $1 ORDER BY createdAt DESC LIMIT $2 OFFSET $3`,
       [req.user.id, limit, offset],
     );
-
     res.json({ page, limit, entries: result.rows });
   } catch (err) {
     console.error(err);
@@ -144,47 +117,15 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// --- UPDATED: Update entry ---
-router.put("/:id", authMiddleware, async (req, res) => {
-  // Now allows updating title and content
-  const { title, content } = req.body;
-  const entryId = req.params.id;
-
-  if (!title && !content) {
-    return res.status(400).json({ message: "Nothing to update" });
-  }
-
+// 5. NEW: Get Single Entry (For View Page)
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
-    // Dynamically build the update query
-    let query = "UPDATE entries SET ";
-    const params = [];
-    let paramCount = 1;
-
-    if (title !== undefined) {
-      query += `title = $${paramCount}, `;
-      params.push(title);
-      paramCount++;
-    }
-    if (content !== undefined) {
-      query += `content = $${paramCount}, `;
-      params.push(content);
-      paramCount++;
-    }
-
-    // Remove trailing comma and space
-    query = query.slice(0, -2);
-
-    query += ` WHERE id = $${paramCount} AND user_id = $${paramCount + 1} RETURNING *`;
-    params.push(entryId, req.user.id);
-
-    const result = await db.query(query, params);
-
-    if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ message: "Entry not found or not authorized" });
-    }
-
+    const result = await db.query(
+      "SELECT * FROM entries WHERE id = $1 AND user_id = $2",
+      [req.params.id, req.user.id],
+    );
+    if (result.rows.length === 0)
+      return res.status(404).json({ message: "Not found" });
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -192,39 +133,65 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// Delete entry - No changes needed here
-router.delete("/:id", authMiddleware, async (req, res) => {
-  const { id } = req.params;
+// 6. Update Entry (UPDATED: Allows title/media edits)
+router.put("/:id", authMiddleware, async (req, res) => {
+  const { title, content, media_urls } = req.body;
+  const entryId = req.params.id;
 
   try {
-    const result = await db.query(
-      `DELETE FROM entries
-       WHERE id = $1 AND user_id = $2`,
-      [id, req.user.id],
-    );
+    // Dynamic update query
+    let query = "UPDATE entries SET ";
+    const params = [];
+    let idx = 1;
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Entry not found" });
+    if (title !== undefined) {
+      query += `title = $${idx++}, `;
+      params.push(title);
+    }
+    if (content !== undefined) {
+      query += `content = $${idx++}, `;
+      params.push(content);
+    }
+    if (media_urls !== undefined) {
+      query += `media_urls = $${idx++}, `;
+      params.push(JSON.stringify(media_urls));
     }
 
-    res.json({ message: "Entry deleted successfully" });
+    query = query.slice(0, -2); // Remove trailing comma
+    query += ` WHERE id = $${idx++} AND user_id = $${idx++} RETURNING *`;
+    params.push(entryId, req.user.id);
+
+    const result = await db.query(query, params);
+    if (result.rows.length === 0)
+      return res.status(404).json({ message: "Not found" });
+    res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
 
-// Multer error handler
+// 7. Delete Entry
+router.delete("/:id", authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(
+      "DELETE FROM entries WHERE id = $1 AND user_id = $2",
+      [req.params.id, req.user.id],
+    );
+    if (result.rowCount === 0)
+      return res.status(404).json({ message: "Not found" });
+    res.json({ message: "Deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Error handling
 router.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
+  if (err instanceof multer.MulterError)
     return res.status(400).json({ message: err.message });
-  }
-
-  if (err) {
-    return res.status(400).json({ message: err.message });
-  }
-
-  next();
+  next(err);
 });
 
 module.exports = router;
