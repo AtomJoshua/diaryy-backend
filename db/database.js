@@ -1,7 +1,6 @@
 const { Pool } = require("pg");
 
 // 1. Connect to Supabase
-// We use the DATABASE_URL environment variable you added in Render
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
@@ -21,13 +20,16 @@ const initDb = async () => {
       );
     `);
 
-    // Create Entries Table
+    // Create Entries Table with NEW columns: title and media_urls
+    // We use JSONB for media_urls to store an array of links efficiently.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS entries (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
+        title TEXT, 
         content TEXT,
+        media_urls JSONB DEFAULT '[]',
         duration INTEGER,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
