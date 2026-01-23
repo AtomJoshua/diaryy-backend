@@ -11,13 +11,7 @@ const initDb = async () => {
   try {
     // Create Users Table
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        username TEXT,
-        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
+      
     `);
 
     // Create Entries Table with NEW columns: title and media_urls
@@ -26,11 +20,12 @@ const initDb = async () => {
       CREATE TABLE IF NOT EXISTS entries (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        type TEXT NOT NULL,
-        title TEXT, 
+        type TEXT NOT NULL, 
+        title TEXT,
         content TEXT,
         media_urls JSONB DEFAULT '[]',
-        duration INTEGER,
+        audio_url TEXT,       
+        duration INTEGER,     
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -46,3 +41,4 @@ initDb();
 
 // Export the connection pool so other files can use it
 module.exports = pool;
+("");
