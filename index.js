@@ -8,29 +8,38 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // --- 1. PARSERS (MUST BE FIRST) ---
-// This ensures the body is parsed before ANY request hits ANY route
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- 2. ALLOWED ORIGINS ---
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://diaryy.vercel.app",
-  "https://diaryy-backend.onrender.com", // Allow the backend to talk to itself for testing
-];
+// --- 2. DYNAMIC ALLOWED ORIGINS ---
+// This logic handles both your local dev AND the comma-separated list from Render
+const getAllowedOrigins = () => {
+  // If we are in production and have the env var set
+  if (process.env.CLIENT_URL) {
+    // Split the string by comma to support multiple URLs
+    return process.env.CLIENT_URL.split(",").map((url) => url.trim());
+  }
+
+  // Fallback for local development if no env var is set
+  return ["http://localhost:5173", "http://localhost:3000"];
+};
+
+const allowedOrigins = getAllowedOrigins();
+console.log("✅ Allowed CORS Origins:", allowedOrigins); // Debugging log
 
 // --- 3. CORS (STRICT SETUP) ---
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or Postman)
+      // Allow requests with no origin (like mobile apps, curl, Postman)
       if (!origin) return callback(null, true);
+
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
+      } else {
+        console.log("⛔ Blocked by CORS:", origin);
+        return callback(new Error("Not allowed by CORS"));
       }
-      // Optional: Log blocked origins to help debugging
-      console.log("Blocked by CORS:", origin);
-      return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -39,29 +48,27 @@ app.use(
 );
 
 // --- 4. DEBUGGING LOG ---
-// This will print every request to your Render logs
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  console.log("Body Content:", req.body); // <--- WATCH THIS IN RENDER LOGS
+  // Only log body if it exists and isn't huge (good for privacy/perf)
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log("📦 Body Content:", JSON.stringify(req.body, null, 2));
+  }
   next();
 });
 
-// --- 5. TEST ROUTE (The Truth Teller) ---
-// We will use this to verify the fix immediately
-app.post("/api/ping", (req, res) => {
-  res.json({
-    message: "Pong!",
-    receivedData: req.body,
-  });
-});
-
-// --- 6. ROUTES ---
+// --- 5. ROUTES ---
 app.use("/api/auth", authRoutes);
 app.use("/api/entries", entryRoutes);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// Test Route
+app.post("/api/ping", (req, res) => {
+  res.json({ message: "Pong!", receivedData: req.body });
+});
+
 app.get("/", (req, res) => {
-  res.send("Diary backend works");
+  res.send("Sanctuary API is secure and running.");
 });
 
 app.listen(PORT, () => {
