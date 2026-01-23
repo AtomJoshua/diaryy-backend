@@ -1,28 +1,46 @@
-const Database = require("better-sqlite3");
-const db = new Database("db/diary.db");
+const { Pool } = require("pg");
 
-// users table
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    createdAt TEXT NOT NULL
-  )
-`).run();
+// 1. Connect to Supabase
+// We use the DATABASE_URL environment variable you added in Render
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-// entries table
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    audioUrl TEXT,
-    duration INTEGER,
-    createdAt TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  )
-`).run();
+// 2. Initialize Tables (Run automatically on startup)
+const initDb = async () => {
+  try {
+    // Create Users Table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        username TEXT,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
-module.exports = db;
+    // Create Entries Table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS entries (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        content TEXT,
+        duration INTEGER,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Connected to Supabase (PostgreSQL) & Tables Ready");
+  } catch (err) {
+    console.error("❌ Database Connection Error:", err);
+  }
+};
+
+// Run the function above immediately
+initDb();
+
+// Export the connection pool so other files can use it
+module.exports = pool;

@@ -1,6 +1,6 @@
 const express = require("express");
 const authMiddleware = require("../middleware/auth");
-const db = require("../db/database");
+const db = require("../db/database"); // This is now the Postgres pool
 const { voiceUpload } = require("../middleware/voiceUpload");
 const multer = require("multer");
 const fs = require("fs");
@@ -8,10 +8,8 @@ const cloudinary = require("../config/cloudinary");
 
 const router = express.Router();
 
-
 // Create text entry
-
-router.post("/", authMiddleware, (req, res) => {
+router.post("/", authMiddleware, async (req, res) => {
   const { content } = req.body;
   const type = "text";
 
@@ -20,35 +18,22 @@ router.post("/", authMiddleware, (req, res) => {
   }
 
   try {
-    const result = db
-      .prepare(
-        `
-      INSERT INTO entries (user_id, type, content, createdAt)
-      VALUES (?, ?, ?, ?)
-    `,
-      )
-      .run(req.user.id, type, content, new Date().toISOString());
+    // PG CHANGE: One step insert + return
+    const result = await db.query(
+      `INSERT INTO entries (user_id, type, content, createdAt)
+       VALUES ($1, $2, $3, NOW())
+       RETURNING *`,
+      [req.user.id, type, content],
+    );
 
-    const entry = db
-      .prepare(
-        `
-      SELECT id, type, content, createdAt
-      FROM entries
-      WHERE id = ?
-    `,
-      )
-      .get(result.lastInsertRowid);
-
-    res.status(201).json(entry);
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
 
-
 // Create voice entry (Cloudinary)
-
 router.post(
   "/voice",
   authMiddleware,
@@ -72,45 +57,23 @@ router.post(
     try {
       // 🔹 Upload to Cloudinary
       const uploadResult = await cloudinary.uploader.upload(req.file.path, {
-        resource_type: "video", // REQUIRED for audio
+        resource_type: "video",
         folder: "diary/voices",
       });
 
       // 🔹 Remove local temp file
       fs.unlink(req.file.path, () => {});
 
-      // 🔹 Save Cloudinary URL
-      const result = db
-        .prepare(
-          `
-        INSERT INTO entries (
-          user_id,
-          type,
-          content,
-          duration,
-          createdAt
-        )
-        VALUES (?, 'voice', ?, ?, ?)
-      `,
-        )
-        .run(
-          req.user.id,
-          uploadResult.secure_url,
-          parsedDuration,
-          new Date().toISOString(),
-        );
+      // 🔹 Save to Postgres
+      // PG CHANGE: Insert Cloudinary URL and return the new row immediately
+      const result = await db.query(
+        `INSERT INTO entries (user_id, type, content, duration, createdAt)
+         VALUES ($1, 'voice', $2, $3, NOW())
+         RETURNING *`,
+        [req.user.id, uploadResult.secure_url, parsedDuration],
+      );
 
-      const entry = db
-        .prepare(
-          `
-        SELECT id, type, content, duration, createdAt
-        FROM entries
-        WHERE id = ?
-      `,
-        )
-        .get(result.lastInsertRowid);
-
-      res.status(201).json(entry);
+      res.status(201).json(result.rows[0]);
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Internal server error" });
@@ -118,38 +81,32 @@ router.post(
   },
 );
 
-
 // Read entries (unified feed)
-
-router.get("/", authMiddleware, (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   const limit = Math.min(parseInt(req.query.limit) || 20, 50);
   const offset = (page - 1) * limit;
 
   try {
-    const entries = db
-      .prepare(
-        `
-      SELECT id, type, content, duration, createdAt
-      FROM entries
-      WHERE user_id = ?
-      ORDER BY createdAt DESC
-      LIMIT ? OFFSET ?
-    `,
-      )
-      .all(req.user.id, limit, offset);
+    // PG CHANGE: Use $1, $2, $3 and .rows
+    const result = await db.query(
+      `SELECT id, type, content, duration, createdAt
+       FROM entries
+       WHERE user_id = $1
+       ORDER BY createdAt DESC
+       LIMIT $2 OFFSET $3`,
+      [req.user.id, limit, offset],
+    );
 
-    res.json({ page, limit, entries });
+    res.json({ page, limit, entries: result.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
 
-
 // Update text entry
-
-router.put("/:id", authMiddleware, (req, res) => {
+router.put("/:id", authMiddleware, async (req, res) => {
   const { content } = req.body;
   const entryId = req.params.id;
 
@@ -158,74 +115,41 @@ router.put("/:id", authMiddleware, (req, res) => {
   }
 
   try {
-    const entry = db
-      .prepare(
-        `
-      SELECT id
-      FROM entries
-      WHERE id = ? AND user_id = ? AND type = 'text'
-    `,
-      )
-      .get(entryId, req.user.id);
+    // PG CHANGE: Update and Return in one shot
+    const result = await db.query(
+      `UPDATE entries
+       SET content = $1
+       WHERE id = $2 AND user_id = $3 AND type = 'text'
+       RETURNING *`,
+      [content, entryId, req.user.id],
+    );
 
-    if (!entry) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Entry not found" });
     }
 
-    db.prepare(
-      `
-      UPDATE entries
-      SET content = ?
-      WHERE id = ? AND user_id = ?
-    `,
-    ).run(content, entryId, req.user.id);
-
-    const updatedEntry = db
-      .prepare(
-        `
-      SELECT id, type, content, createdAt
-      FROM entries
-      WHERE id = ?
-    `,
-      )
-      .get(entryId);
-
-    res.json(updatedEntry);
+    res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
 
-
 // Delete entry
-
-router.delete("/:id", authMiddleware, (req, res) => {
+router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
   try {
-    const entry = db
-      .prepare(
-        `
-      SELECT id, type, content
-      FROM entries
-      WHERE id = ? AND user_id = ?
-    `,
-      )
-      .get(id, req.user.id);
+    // PG CHANGE: Delete and check rowCount
+    const result = await db.query(
+      `DELETE FROM entries
+       WHERE id = $1 AND user_id = $2`,
+      [id, req.user.id],
+    );
 
-    if (!entry) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ message: "Entry not found" });
     }
-
-    // Cloudinary files are NOT deleted here (safe for now)
-
-    db.prepare(
-      `
-      DELETE FROM entries
-      WHERE id = ? AND user_id = ?
-    `,
-    ).run(id, req.user.id);
 
     res.json({ message: "Entry deleted successfully" });
   } catch (err) {
@@ -234,9 +158,7 @@ router.delete("/:id", authMiddleware, (req, res) => {
   }
 });
 
-
 // Multer error handler
-
 router.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     return res.status(400).json({ message: err.message });
